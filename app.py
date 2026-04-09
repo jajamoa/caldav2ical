@@ -2,6 +2,7 @@ import os
 import caldav
 from flask import Flask, Response, render_template_string, request, abort
 import hashlib
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -15,31 +16,49 @@ HTML = """
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f7; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-  .card { background: white; border-radius: 16px; padding: 40px; max-width: 520px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+  .card { background: white; border-radius: 16px; padding: 40px; max-width: 560px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
   h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #1d1d1f; }
-  p { color: #6e6e73; font-size: 14px; margin-bottom: 28px; line-height: 1.5; }
+  .subtitle { color: #6e6e73; font-size: 14px; margin-bottom: 28px; line-height: 1.5; }
   label { display: block; font-size: 13px; font-weight: 600; color: #1d1d1f; margin-bottom: 6px; }
   input { width: 100%; padding: 10px 14px; border: 1.5px solid #d2d2d7; border-radius: 8px; font-size: 14px; outline: none; transition: border-color 0.2s; margin-bottom: 16px; }
   input:focus { border-color: #0071e3; }
   button { width: 100%; padding: 12px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
   button:hover { background: #0077ed; }
-  .result { margin-top: 24px; padding: 16px; background: #f5f5f7; border-radius: 8px; display: none; }
+  button:disabled { background: #a0c4f1; cursor: not-allowed; }
+
+  /* Preview */
+  .preview { margin-top: 24px; display: none; }
+  .preview.show { display: block; }
+  .preview h2 { font-size: 15px; font-weight: 600; color: #1d1d1f; margin-bottom: 12px; }
+  .cal-name { font-size: 12px; font-weight: 600; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.5px; margin: 16px 0 8px; }
+  .event-list { list-style: none; }
+  .event-item { padding: 10px 12px; border-radius: 8px; background: #f5f5f7; margin-bottom: 6px; font-size: 13px; }
+  .event-title { font-weight: 600; color: #1d1d1f; }
+  .event-time { color: #6e6e73; font-size: 12px; margin-top: 2px; }
+  .no-events { font-size: 13px; color: #6e6e73; font-style: italic; }
+  .confirm-btn { margin-top: 20px; background: #34c759; }
+  .confirm-btn:hover { background: #30b350; }
+
+  /* Result */
+  .result { margin-top: 24px; display: none; }
   .result.show { display: block; }
-  .result label { margin-bottom: 8px; }
+  .result h2 { font-size: 15px; font-weight: 600; color: #1d1d1f; margin-bottom: 12px; }
   .url-box { display: flex; gap: 8px; }
-  .url-box input { margin-bottom: 0; flex: 1; font-family: monospace; font-size: 12px; background: white; }
+  .url-box input { margin-bottom: 0; flex: 1; font-family: monospace; font-size: 12px; background: #f5f5f7; }
   .copy-btn { padding: 10px 16px; background: #34c759; color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; width: auto; }
   .copy-btn:hover { background: #30b350; }
-  .hint { margin-top: 12px; font-size: 12px; color: #6e6e73; }
-  .hint a { color: #0071e3; text-decoration: none; }
+  .hint { margin-top: 10px; font-size: 12px; color: #6e6e73; line-height: 1.5; }
+
   .error { color: #ff3b30; font-size: 13px; margin-top: 12px; display: none; }
   .error.show { display: block; }
+  .divider { border: none; border-top: 1.5px solid #f0f0f0; margin: 24px 0; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>CalDAV → iCal Bridge</h1>
-  <p>Convert your CalDAV calendar (Lark, Nextcloud, etc.) into a public iCal URL that Google Calendar can subscribe to.</p>
+  <p class="subtitle">Connect your CalDAV calendar and get a shareable iCal URL for Google Calendar, Apple Calendar, and more.</p>
+
   <form id="form">
     <label>CalDAV Server URL</label>
     <input type="text" id="server" placeholder="e.g. https://caldav-jp.larksuite.com" required />
@@ -47,47 +66,118 @@ HTML = """
     <input type="text" id="username" placeholder="your CalDAV username" required />
     <label>Password / Token</label>
     <input type="password" id="password" placeholder="your CalDAV password or token" required />
-    <button type="submit">Generate iCal URL</button>
+    <button type="submit" id="connect-btn">Connect & Preview</button>
   </form>
+
   <div class="error" id="error"></div>
+
+  <div class="preview" id="preview">
+    <hr class="divider">
+    <h2>📅 Found your calendars</h2>
+    <div id="preview-content"></div>
+    <button class="confirm-btn" onclick="generateUrl()">Generate iCal URL →</button>
+  </div>
+
   <div class="result" id="result">
-    <label>Your iCal URL (paste into Google Calendar):</label>
+    <hr class="divider">
+    <h2>✅ Your iCal URL</h2>
     <div class="url-box">
       <input type="text" id="ical-url" readonly />
       <button class="copy-btn" onclick="copyUrl()">Copy</button>
     </div>
-    <p class="hint">In Google Calendar: Other calendars → + → From URL → paste above.<br>
-    Subscribe link also works with Apple Calendar, Outlook, etc.</p>
+    <p class="hint">
+      <strong>Google Calendar:</strong> Other calendars → + → From URL → paste above.<br>
+      Works with Apple Calendar, Outlook, and any app that supports iCal subscriptions.
+    </p>
   </div>
 </div>
+
 <script>
+let _previewToken = null;
+
 document.getElementById('form').onsubmit = async (e) => {
   e.preventDefault();
-  const btn = e.target.querySelector('button');
-  btn.textContent = 'Generating...';
+  const btn = document.getElementById('connect-btn');
+  btn.textContent = 'Connecting...';
   btn.disabled = true;
   document.getElementById('error').classList.remove('show');
+  document.getElementById('preview').classList.remove('show');
   document.getElementById('result').classList.remove('show');
-  const res = await fetch('/generate', {
+
+  const res = await fetch('/preview', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
-      server: document.getElementById('server').value,
-      username: document.getElementById('username').value,
-      password: document.getElementById('password').value,
+      server: document.getElementById('server').value.trim(),
+      username: document.getElementById('username').value.trim(),
+      password: document.getElementById('password').value.trim(),
     })
   });
   const data = await res.json();
-  btn.textContent = 'Generate iCal URL';
+  btn.textContent = 'Connect & Preview';
   btn.disabled = false;
+
   if (data.error) {
     document.getElementById('error').textContent = '❌ ' + data.error;
     document.getElementById('error').classList.add('show');
-  } else {
-    document.getElementById('ical-url').value = data.url;
-    document.getElementById('result').classList.add('show');
+    return;
   }
+
+  _previewToken = data.token;
+  renderPreview(data.calendars);
+  document.getElementById('preview').classList.add('show');
 };
+
+function renderPreview(calendars) {
+  const container = document.getElementById('preview-content');
+  let html = '';
+  let total = 0;
+  for (const cal of calendars) {
+    html += `<div class="cal-name">📁 ${cal.name} (${cal.events.length} events)</div>`;
+    if (cal.events.length === 0) {
+      html += '<p class="no-events">No upcoming events</p>';
+    } else {
+      html += '<ul class="event-list">';
+      for (const ev of cal.events.slice(0, 5)) {
+        html += `<li class="event-item"><div class="event-title">${ev.title}</div><div class="event-time">${ev.time}</div></li>`;
+      }
+      if (cal.events.length > 5) {
+        html += `<li class="event-item no-events">+ ${cal.events.length - 5} more events</li>`;
+      }
+      html += '</ul>';
+      total += cal.events.length;
+    }
+  }
+  html = `<p style="font-size:13px;color:#6e6e73;margin-bottom:12px;">Found <strong>${calendars.length}</strong> calendar(s) with <strong>${total}</strong> total events.</p>` + html;
+  container.innerHTML = html;
+}
+
+async function generateUrl() {
+  if (!_previewToken) return;
+  const btn = document.querySelector('.confirm-btn');
+  btn.textContent = 'Generating...';
+  btn.disabled = true;
+
+  const res = await fetch('/confirm', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ token: _previewToken })
+  });
+  const data = await res.json();
+  btn.textContent = 'Generate iCal URL →';
+  btn.disabled = false;
+
+  if (data.error) {
+    document.getElementById('error').textContent = '❌ ' + data.error;
+    document.getElementById('error').classList.add('show');
+    return;
+  }
+
+  document.getElementById('ical-url').value = data.url;
+  document.getElementById('result').classList.add('show');
+  document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
+}
+
 function copyUrl() {
   const input = document.getElementById('ical-url');
   input.select();
@@ -105,6 +195,28 @@ def make_token(server, username, password):
     raw = f"{server}|{username}|{password}"
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
+def parse_event(event_data):
+    """Extract title and time from raw iCal event data."""
+    title = "Untitled"
+    time_str = ""
+    dtstart = ""
+    for line in event_data.splitlines():
+        if line.startswith("SUMMARY:"):
+            title = line[8:].strip()
+        elif line.startswith("DTSTART"):
+            dtstart = line.split(":")[-1].strip()
+    if dtstart:
+        try:
+            if "T" in dtstart:
+                dt = datetime.strptime(dtstart[:15], "%Y%m%dT%H%M%S")
+                time_str = dt.strftime("%b %d, %Y %H:%M")
+            else:
+                dt = datetime.strptime(dtstart[:8], "%Y%m%d")
+                time_str = dt.strftime("%b %d, %Y")
+        except Exception:
+            time_str = dtstart
+    return {"title": title, "time": time_str}
+
 # In-memory store: token -> (server, username, password)
 _store = {}
 
@@ -112,8 +224,8 @@ _store = {}
 def index():
     return render_template_string(HTML)
 
-@app.route('/generate', methods=['POST'])
-def generate():
+@app.route('/preview', methods=['POST'])
+def preview():
     data = request.json
     server = data.get('server', '').strip().rstrip('/')
     username = data.get('username', '').strip()
@@ -122,19 +234,36 @@ def generate():
     if not all([server, username, password]):
         return {'error': 'All fields are required.'}, 400
 
-    # Test connection
     try:
         client = caldav.DAVClient(url=server, username=username, password=password)
         principal = client.principal()
         calendars = principal.calendars()
-        if not calendars:
-            return {'error': 'Connected but no calendars found.'}, 400
     except Exception as e:
         return {'error': f'Connection failed: {str(e)}'}, 400
 
     token = make_token(server, username, password)
     _store[token] = (server, username, password)
 
+    cal_preview = []
+    for cal in calendars:
+        try:
+            cal_name = str(cal.name) if cal.name else "Calendar"
+            events = cal.events()
+            parsed = [parse_event(ev.data) for ev in events[:20]]
+            # Sort by time
+            parsed.sort(key=lambda x: x['time'] or '')
+            cal_preview.append({"name": cal_name, "events": parsed})
+        except Exception:
+            cal_preview.append({"name": "Calendar", "events": []})
+
+    return {'token': token, 'calendars': cal_preview}
+
+@app.route('/confirm', methods=['POST'])
+def confirm():
+    data = request.json
+    token = data.get('token', '')
+    if token not in _store:
+        return {'error': 'Session expired, please reconnect.'}, 400
     host = request.host_url.rstrip('/')
     return {'url': f'{host}/ical/{token}'}
 
@@ -155,7 +284,6 @@ def serve_ical(token):
         for cal in calendars:
             for event in cal.events():
                 ical_data = event.data
-                # Extract VEVENT blocks
                 in_event = False
                 for line in ical_data.splitlines():
                     if line.startswith('BEGIN:VEVENT'):
