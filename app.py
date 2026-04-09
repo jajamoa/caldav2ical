@@ -2,7 +2,7 @@ import os
 import caldav
 from flask import Flask, Response, render_template_string, request, abort
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 app = Flask(__name__)
 
@@ -244,16 +244,25 @@ def preview():
     token = make_token(server, username, password)
     _store[token] = (server, username, password)
 
+    # Fetch events from 1 year ago to 1 year ahead
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=365)
+    end = now + timedelta(days=365)
+
     cal_preview = []
     for cal in calendars:
         try:
             cal_name = str(cal.name) if cal.name else "Calendar"
-            events = cal.events()
-            parsed = [parse_event(ev.data) for ev in events[:20]]
-            # Sort by time
+            # Try date-range search first, fall back to all events
+            try:
+                events = cal.date_search(start=start, end=end, expand=True)
+            except Exception:
+                events = cal.events()
+            parsed = [parse_event(ev.data) for ev in events[:50]]
+            parsed = [p for p in parsed if p['title'] != 'Untitled' or p['time']]
             parsed.sort(key=lambda x: x['time'] or '')
             cal_preview.append({"name": cal_name, "events": parsed})
-        except Exception:
+        except Exception as e:
             cal_preview.append({"name": "Calendar", "events": []})
 
     return {'token': token, 'calendars': cal_preview}
@@ -281,8 +290,16 @@ def serve_ical(token):
 
         lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CalDAV2iCal Bridge//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH']
 
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=365)
+        end = now + timedelta(days=365)
+
         for cal in calendars:
-            for event in cal.events():
+            try:
+                events = cal.date_search(start=start, end=end, expand=True)
+            except Exception:
+                events = cal.events()
+            for event in events:
                 ical_data = event.data
                 in_event = False
                 for line in ical_data.splitlines():
