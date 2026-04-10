@@ -246,8 +246,8 @@ def preview():
 
     # Fetch events from 1 year ago to 1 year ahead
     now = datetime.now(timezone.utc)
-    start = now - timedelta(days=365)
-    end = now + timedelta(days=365)
+    start = now - timedelta(days=30)
+    end = now + timedelta(days=90)
 
     cal_preview = []
     for cal in calendars:
@@ -255,7 +255,7 @@ def preview():
             cal_name = str(cal.name) if cal.name else "Calendar"
             # Try date-range search first, fall back to all events
             try:
-                events = cal.date_search(start=start, end=end, expand=True)
+                events = cal.date_search(start=start, end=end)
             except Exception:
                 events = cal.events()
             parsed = [parse_event(ev.data) for ev in events[:50]]
@@ -296,7 +296,7 @@ def serve_ical(token):
 
         for cal in calendars:
             try:
-                events = cal.date_search(start=start, end=end, expand=True)
+                events = cal.date_search(start=start, end=end)
             except Exception:
                 events = cal.events()
             for event in events:
