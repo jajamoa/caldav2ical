@@ -1,5 +1,6 @@
 import os
 import caldav
+import threading
 from flask import Flask, Response, render_template_string, request, abort
 import hashlib
 from datetime import datetime, timezone, timedelta
@@ -25,21 +26,6 @@ HTML = """
   button { width: 100%; padding: 12px; background: #0071e3; color: white; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
   button:hover { background: #0077ed; }
   button:disabled { background: #a0c4f1; cursor: not-allowed; }
-
-  /* Preview */
-  .preview { margin-top: 24px; display: none; }
-  .preview.show { display: block; }
-  .preview h2 { font-size: 15px; font-weight: 600; color: #1d1d1f; margin-bottom: 12px; }
-  .cal-name { font-size: 12px; font-weight: 600; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.5px; margin: 16px 0 8px; }
-  .event-list { list-style: none; }
-  .event-item { padding: 10px 12px; border-radius: 8px; background: #f5f5f7; margin-bottom: 6px; font-size: 13px; }
-  .event-title { font-weight: 600; color: #1d1d1f; }
-  .event-time { color: #6e6e73; font-size: 12px; margin-top: 2px; }
-  .no-events { font-size: 13px; color: #6e6e73; font-style: italic; }
-  .confirm-btn { margin-top: 20px; background: #34c759; }
-  .confirm-btn:hover { background: #30b350; }
-
-  /* Result */
   .result { margin-top: 24px; display: none; }
   .result.show { display: block; }
   .result h2 { font-size: 15px; font-weight: 600; color: #1d1d1f; margin-bottom: 12px; }
@@ -48,16 +34,24 @@ HTML = """
   .copy-btn { padding: 10px 16px; background: #34c759; color: white; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; width: auto; }
   .copy-btn:hover { background: #30b350; }
   .hint { margin-top: 10px; font-size: 12px; color: #6e6e73; line-height: 1.5; }
-
+  .preview-section { margin-top: 20px; padding: 16px; background: #f5f5f7; border-radius: 8px; display: none; }
+  .preview-section.show { display: block; }
+  .preview-section h3 { font-size: 13px; font-weight: 600; color: #6e6e73; margin-bottom: 10px; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #d2d2d7; border-top-color: #0071e3; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .cal-name { font-size: 12px; font-weight: 600; color: #6e6e73; text-transform: uppercase; letter-spacing: 0.5px; margin: 12px 0 6px; }
+  .event-item { padding: 8px 10px; border-radius: 6px; background: white; margin-bottom: 4px; font-size: 13px; }
+  .event-title { font-weight: 600; color: #1d1d1f; }
+  .event-time { color: #6e6e73; font-size: 12px; margin-top: 1px; }
   .error { color: #ff3b30; font-size: 13px; margin-top: 12px; display: none; }
   .error.show { display: block; }
-  .divider { border: none; border-top: 1.5px solid #f0f0f0; margin: 24px 0; }
+  .divider { border: none; border-top: 1.5px solid #f0f0f0; margin: 20px 0; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>CalDAV → iCal Bridge</h1>
-  <p class="subtitle">Connect your CalDAV calendar and get a shareable iCal URL for Google Calendar, Apple Calendar, and more.</p>
+  <p class="subtitle">Connect your CalDAV calendar (Lark, Nextcloud, etc.) and get a shareable iCal URL for Google Calendar and more.</p>
 
   <form id="form">
     <label>CalDAV Server URL</label>
@@ -66,17 +60,10 @@ HTML = """
     <input type="text" id="username" placeholder="your CalDAV username" required />
     <label>Password / Token</label>
     <input type="password" id="password" placeholder="your CalDAV password or token" required />
-    <button type="submit" id="connect-btn">Connect & Preview</button>
+    <button type="submit" id="connect-btn">Generate iCal URL</button>
   </form>
 
   <div class="error" id="error"></div>
-
-  <div class="preview" id="preview">
-    <hr class="divider">
-    <h2>📅 Found your calendars</h2>
-    <div id="preview-content"></div>
-    <button class="confirm-btn" onclick="generateUrl()">Generate iCal URL →</button>
-  </div>
 
   <div class="result" id="result">
     <hr class="divider">
@@ -87,13 +74,18 @@ HTML = """
     </div>
     <p class="hint">
       <strong>Google Calendar:</strong> Other calendars → + → From URL → paste above.<br>
-      Works with Apple Calendar, Outlook, and any app that supports iCal subscriptions.
+      Works with Apple Calendar, Outlook, and any iCal-compatible app.
     </p>
+
+    <div class="preview-section show" id="preview-section">
+      <h3><span class="spinner"></span> Loading calendar preview...</h3>
+      <div id="preview-content"></div>
+    </div>
   </div>
 </div>
 
 <script>
-let _previewToken = null;
+let _token = null;
 
 document.getElementById('form').onsubmit = async (e) => {
   e.preventDefault();
@@ -101,20 +93,21 @@ document.getElementById('form').onsubmit = async (e) => {
   btn.textContent = 'Connecting...';
   btn.disabled = true;
   document.getElementById('error').classList.remove('show');
-  document.getElementById('preview').classList.remove('show');
   document.getElementById('result').classList.remove('show');
 
-  const res = await fetch('/preview', {
+  const payload = {
+    server: document.getElementById('server').value.trim().replace(/\\/+$/, ''),
+    username: document.getElementById('username').value.trim(),
+    password: document.getElementById('password').value.trim(),
+  };
+
+  const res = await fetch('/generate', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      server: document.getElementById('server').value.trim(),
-      username: document.getElementById('username').value.trim(),
-      password: document.getElementById('password').value.trim(),
-    })
+    body: JSON.stringify(payload)
   });
   const data = await res.json();
-  btn.textContent = 'Connect & Preview';
+  btn.textContent = 'Generate iCal URL';
   btn.disabled = false;
 
   if (data.error) {
@@ -123,59 +116,46 @@ document.getElementById('form').onsubmit = async (e) => {
     return;
   }
 
-  _previewToken = data.token;
-  renderPreview(data.calendars);
-  document.getElementById('preview').classList.add('show');
-};
-
-function renderPreview(calendars) {
-  const container = document.getElementById('preview-content');
-  let html = '';
-  let total = 0;
-  for (const cal of calendars) {
-    html += `<div class="cal-name">📁 ${cal.name} (${cal.events.length} events)</div>`;
-    if (cal.events.length === 0) {
-      html += '<p class="no-events">No upcoming events</p>';
-    } else {
-      html += '<ul class="event-list">';
-      for (const ev of cal.events.slice(0, 5)) {
-        html += `<li class="event-item"><div class="event-title">${ev.title}</div><div class="event-time">${ev.time}</div></li>`;
-      }
-      if (cal.events.length > 5) {
-        html += `<li class="event-item no-events">+ ${cal.events.length - 5} more events</li>`;
-      }
-      html += '</ul>';
-      total += cal.events.length;
-    }
-  }
-  html = `<p style="font-size:13px;color:#6e6e73;margin-bottom:12px;">Found <strong>${calendars.length}</strong> calendar(s) with <strong>${total}</strong> total events.</p>` + html;
-  container.innerHTML = html;
-}
-
-async function generateUrl() {
-  if (!_previewToken) return;
-  const btn = document.querySelector('.confirm-btn');
-  btn.textContent = 'Generating...';
-  btn.disabled = true;
-
-  const res = await fetch('/confirm', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ token: _previewToken })
-  });
-  const data = await res.json();
-  btn.textContent = 'Generate iCal URL →';
-  btn.disabled = false;
-
-  if (data.error) {
-    document.getElementById('error').textContent = '❌ ' + data.error;
-    document.getElementById('error').classList.add('show');
-    return;
-  }
-
+  _token = data.token;
   document.getElementById('ical-url').value = data.url;
   document.getElementById('result').classList.add('show');
   document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
+
+  // Load preview async
+  loadPreview(_token);
+};
+
+async function loadPreview(token) {
+  const section = document.getElementById('preview-section');
+  const content = document.getElementById('preview-content');
+
+  try {
+    const res = await fetch('/preview/' + token);
+    const data = await res.json();
+
+    if (data.error) {
+      section.querySelector('h3').textContent = '⚠️ Preview unavailable';
+      return;
+    }
+
+    let total = 0;
+    let html = '';
+    for (const cal of data.calendars) {
+      html += `<div class="cal-name">📁 ${cal.name} (${cal.events.length} events)</div>`;
+      for (const ev of cal.events.slice(0, 5)) {
+        html += `<div class="event-item"><div class="event-title">${ev.title}</div><div class="event-time">${ev.time}</div></div>`;
+      }
+      if (cal.events.length > 5) {
+        html += `<div class="event-item" style="color:#6e6e73;font-size:12px">+${cal.events.length - 5} more</div>`;
+      }
+      total += cal.events.length;
+    }
+
+    section.querySelector('h3').textContent = `📅 Found ${data.calendars.length} calendar(s), ${total} events`;
+    content.innerHTML = html;
+  } catch(e) {
+    section.querySelector('h3').textContent = '⚠️ Preview unavailable';
+  }
 }
 
 function copyUrl() {
@@ -196,7 +176,6 @@ def make_token(server, username, password):
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 def parse_event(event_data):
-    """Extract title and time from raw iCal event data."""
     title = "Untitled"
     time_str = ""
     dtstart = ""
@@ -217,15 +196,16 @@ def parse_event(event_data):
             time_str = dtstart
     return {"title": title, "time": time_str}
 
-# In-memory store: token -> (server, username, password)
+# In-memory store
 _store = {}
+_preview_cache = {}
 
 @app.route('/')
 def index():
     return render_template_string(HTML)
 
-@app.route('/preview', methods=['POST'])
-def preview():
+@app.route('/generate', methods=['POST'])
+def generate():
     data = request.json
     server = data.get('server', '').strip().rstrip('/')
     username = data.get('username', '').strip()
@@ -234,47 +214,65 @@ def preview():
     if not all([server, username, password]):
         return {'error': 'All fields are required.'}, 400
 
+    # Quick auth check only (fast)
     try:
-        client = caldav.DAVClient(url=server, username=username, password=password, timeout=30)
+        client = caldav.DAVClient(url=server, username=username, password=password, timeout=10)
         principal = client.principal()
-        calendars = principal.calendars()
     except Exception as e:
         return {'error': f'Connection failed: {str(e)}'}, 400
 
     token = make_token(server, username, password)
     _store[token] = (server, username, password)
 
-    # Fetch events from 1 year ago to 1 year ahead
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=30)
-    end = now + timedelta(days=90)
+    # Trigger background preview load
+    threading.Thread(target=_load_preview_bg, args=(token, server, username, password), daemon=True).start()
 
-    cal_preview = []
-    for cal in calendars:
-        try:
-            cal_name = str(cal.name) if cal.name else "Calendar"
-            # Try date-range search first, fall back to all events
-            try:
-                events = cal.date_search(start=start, end=end)
-            except Exception:
-                events = cal.events()
-            parsed = [parse_event(ev.data) for ev in events[:50]]
-            parsed = [p for p in parsed if p['title'] != 'Untitled' or p['time']]
-            parsed.sort(key=lambda x: x['time'] or '')
-            cal_preview.append({"name": cal_name, "events": parsed})
-        except Exception as e:
-            cal_preview.append({"name": "Calendar", "events": []})
-
-    return {'token': token, 'calendars': cal_preview}
-
-@app.route('/confirm', methods=['POST'])
-def confirm():
-    data = request.json
-    token = data.get('token', '')
-    if token not in _store:
-        return {'error': 'Session expired, please reconnect.'}, 400
     host = request.host_url.rstrip('/')
-    return {'url': f'{host}/ical/{token}'}
+    return {'token': token, 'url': f'{host}/ical/{token}'}
+
+def _load_preview_bg(token, server, username, password):
+    """Load calendar preview in background thread."""
+    try:
+        client = caldav.DAVClient(url=server, username=username, password=password, timeout=25)
+        principal = client.principal()
+        calendars = principal.calendars()
+
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=30)
+        end = now + timedelta(days=90)
+
+        cal_preview = []
+        for cal in calendars:
+            try:
+                cal_name = str(cal.name) if cal.name else "Calendar"
+                try:
+                    events = cal.date_search(start=start, end=end)
+                except Exception:
+                    events = cal.events()
+                parsed = [parse_event(ev.data) for ev in events[:50]]
+                parsed = [p for p in parsed if p['title'] != 'Untitled' or p['time']]
+                parsed.sort(key=lambda x: x['time'] or '')
+                cal_preview.append({"name": cal_name, "events": parsed})
+            except Exception:
+                cal_preview.append({"name": "Calendar", "events": []})
+
+        _preview_cache[token] = {"calendars": cal_preview}
+    except Exception as e:
+        _preview_cache[token] = {"error": str(e)}
+
+@app.route('/preview/<token>')
+def get_preview(token):
+    if token not in _store:
+        abort(404)
+
+    # Poll up to 25s
+    import time
+    for _ in range(25):
+        if token in _preview_cache:
+            return _preview_cache[token]
+        time.sleep(1)
+
+    return {"error": "Preview timed out"}, 408
 
 @app.route('/ical/<token>')
 def serve_ical(token):
@@ -284,15 +282,16 @@ def serve_ical(token):
     server, username, password = _store[token]
 
     try:
-        client = caldav.DAVClient(url=server, username=username, password=password, timeout=30)
+        client = caldav.DAVClient(url=server, username=username, password=password, timeout=25)
         principal = client.principal()
         calendars = principal.calendars()
-
-        lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CalDAV2iCal Bridge//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH']
 
         now = datetime.now(timezone.utc)
         start = now - timedelta(days=365)
         end = now + timedelta(days=365)
+
+        lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CalDAV2iCal Bridge//EN',
+                 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH']
 
         for cal in calendars:
             try:
