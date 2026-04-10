@@ -235,7 +235,7 @@ def preview():
         return {'error': 'All fields are required.'}, 400
 
     try:
-        client = caldav.DAVClient(url=server, username=username, password=password)
+        client = caldav.DAVClient(url=server, username=username, password=password, timeout=30)
         principal = client.principal()
         calendars = principal.calendars()
     except Exception as e:
@@ -284,7 +284,7 @@ def serve_ical(token):
     server, username, password = _store[token]
 
     try:
-        client = caldav.DAVClient(url=server, username=username, password=password)
+        client = caldav.DAVClient(url=server, username=username, password=password, timeout=30)
         principal = client.principal()
         calendars = principal.calendars()
 
