@@ -245,21 +245,17 @@ def _load_preview_bg(token, server, username, password):
         for cal in calendars:
             try:
                 cal_name = str(cal.name) if cal.name else "Calendar"
-                events = []
-                # Try multiple methods to get events
-                for method in [
-                    lambda: cal.date_search(start=start, end=end, expand=True),
-                    lambda: cal.date_search(start=start, end=end),
-                    lambda: cal.events(),
-                    lambda: list(cal.objects()),
-                ]:
+                # Lark CalDAV requires objects() + load() per object
+                objs = list(cal.objects())
+                events_data = []
+                for obj in objs[:50]:
                     try:
-                        events = method()
-                        if events:
-                            break
+                        obj.load()
+                        if obj.data:
+                            events_data.append(obj.data)
                     except Exception:
                         continue
-                parsed = [parse_event(ev.data) for ev in events[:50]]
+                parsed = [parse_event(d) for d in events_data]
                 parsed = [p for p in parsed if p['title'] != 'Untitled' or p['time']]
                 parsed.sort(key=lambda x: x['time'] or '')
                 cal_preview.append({"name": cal_name, "events": parsed})
@@ -304,20 +300,12 @@ def serve_ical(token):
                  'CALSCALE:GREGORIAN', 'METHOD:PUBLISH']
 
         for cal in calendars:
-            events = []
-            for method in [
-                lambda c=cal: c.date_search(start=start, end=end, expand=True),
-                lambda c=cal: c.date_search(start=start, end=end),
-                lambda c=cal: c.events(),
-                lambda c=cal: list(c.objects()),
-            ]:
+            objs = list(cal.objects())
+            for event in objs:
                 try:
-                    events = method()
-                    if events:
-                        break
+                    event.load()
                 except Exception:
-                    continue
-            for event in events:
+                    pass
                 ical_data = event.data
                 in_event = False
                 for line in ical_data.splitlines():
