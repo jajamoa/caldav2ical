@@ -245,10 +245,20 @@ def _load_preview_bg(token, server, username, password):
         for cal in calendars:
             try:
                 cal_name = str(cal.name) if cal.name else "Calendar"
-                try:
-                    events = cal.date_search(start=start, end=end)
-                except Exception:
-                    events = cal.events()
+                events = []
+                # Try multiple methods to get events
+                for method in [
+                    lambda: cal.date_search(start=start, end=end, expand=True),
+                    lambda: cal.date_search(start=start, end=end),
+                    lambda: cal.events(),
+                    lambda: list(cal.objects()),
+                ]:
+                    try:
+                        events = method()
+                        if events:
+                            break
+                    except Exception:
+                        continue
                 parsed = [parse_event(ev.data) for ev in events[:50]]
                 parsed = [p for p in parsed if p['title'] != 'Untitled' or p['time']]
                 parsed.sort(key=lambda x: x['time'] or '')
@@ -294,10 +304,19 @@ def serve_ical(token):
                  'CALSCALE:GREGORIAN', 'METHOD:PUBLISH']
 
         for cal in calendars:
-            try:
-                events = cal.date_search(start=start, end=end)
-            except Exception:
-                events = cal.events()
+            events = []
+            for method in [
+                lambda c=cal: c.date_search(start=start, end=end, expand=True),
+                lambda c=cal: c.date_search(start=start, end=end),
+                lambda c=cal: c.events(),
+                lambda c=cal: list(c.objects()),
+            ]:
+                try:
+                    events = method()
+                    if events:
+                        break
+                except Exception:
+                    continue
             for event in events:
                 ical_data = event.data
                 in_event = False
